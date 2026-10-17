@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoice Generator — InsightLogiq</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <link rel="stylesheet" href="common.css">
+
+</head>
+
+<body>
+  <div class="wrap">
+
+    <div class="brand"><img src="../assets/InsightLogiq%20Logo.png" alt="InsightLogiq Logo"
+        class="brand-logo"><span>InsightLogiq</span></div>
+    <h1>Invoice Generator</h1>
+    <div class="sub">Load a quotation to create one invoice covering all websites and charges in it.</div>
+
+    <section class="card">
+      <h2>Invoice Details</h2>
+      <div class="grid2">
+        <div class="field"><label for="quotationRef">Quotation Ref. (ID)</label>
+          <input type="text" id="quotationRef" placeholder="e.g. Q-20260924-3">
+        </div>
+        <div class="field"><label for="clientName">Billed To (Client Name)</label>
+          <input type="text" id="clientName" placeholder="Loaded from quotation" readonly>
+        </div>
+        <div class="field"><label for="invoiceDate">Invoice Date</label>
+          <input type="date" id="invoiceDate">
+        </div>
+        <div class="field"><label for="dueDate">Due Date</label>
+          <input type="date" id="dueDate">
+        </div>
+      </div>
+      <div class="submit-bar" style="margin-top: 14px;">
+        <button class="primary" type="button" id="loadQuotationBtn">Load Quotation</button>
+        <span class="status" id="loadStatus"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Charges</h2>
+      <div id="quotationCharges"><span class="status">Load a quotation to see its websites and charges.</span></div>
+    </section>
+
+    <section class="card">
+      <h2>Summary</h2>
+      <div class="summary-row"><span>Subtotal</span><span id="subtotal">₹0</span></div>
+      <div class="summary-row"><span>Quotation discount</span><span id="discountAmount">−₹0</span></div>
+      <div class="summary-row"><span>GST (18%)</span><span id="gstValue">₹0</span></div>
+      <div class="summary-row total"><span>Total Payable</span><span id="totalPayable">₹0</span></div>
+    </section>
+
+    <section class="card">
+      <h2>Payment</h2>
+      <div class="grid2">
+        <div class="field"><label for="paymentStatus">Payment amount</label>
+          <select id="paymentStatus">
+            <option value="unpaid">Unpaid / due</option>
+            <option value="partial">Partial payment</option>
+            <option value="full">Full payment</option>
+          </select>
+        </div>
+        <div class="field" id="amountPaidField" hidden><label for="amountPaid">Amount received</label>
+          <input type="number" id="amountPaid" min="0" step="0.01" placeholder="₹0">
+        </div>
+        <div class="field" id="paymentModeField" hidden><label for="paymentMode">Payment mode</label>
+          <select id="paymentMode">
+            <option value="cash">Cash</option>
+            <option value="online">Online</option>
+          </select>
+        </div>
+        <div class="field payment-field" id="paymentReferenceField" hidden><label for="paymentReference">Online
+            transaction reference (optional)</label>
+          <input type="text" id="paymentReference" placeholder="UPI / bank / gateway reference">
+        </div>
+      </div>
+      <div class="summary-row"><span>Amount received</span><span id="amountReceivedSummary">₹0</span></div>
+      <div class="summary-row"><span>Balance due</span><span id="balanceDue">₹0</span></div>
+    </section>
+
+    <section class="card">
+      <div class="submit-bar">
+        <button class="primary" id="previewBtn">Preview Invoice</button>
+        <span class="status" id="statusMsg"></span>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal-box">
+      <div class="modal-toolbar">
+        <strong style="font-size:13.5px;color:var(--blue);">Invoice Preview</strong>
+        <div class="actions">
+          <button class="btn-close" id="closeModalBtn">Close</button>
+          <button class="btn-download" id="downloadPdfBtn">Download PDF</button>
+          <button class="btn-confirm" id="confirmSaveBtn">Confirm &amp; Save</button>
+        </div>
+      </div>
+      <div id="docPreview"></div>
+      <div class="result" id="resultBox" style="margin:0 34px 22px;">
+        Saved as <strong id="resultId"></strong>.
+      </div>
+    </div>
+  </div>
+
+  <script src="insightlogiq-tools.js"></script>
+  <script src="insightlogiq-api.js"></script>
+  <script>
+    /* ============ CONFIG ============ */
+    const tools = window.InsightLogiqTools;
+    const api = window.InsightLogiqApi;
+
+    const SCRIPT_URL = tools.SCRIPT_URL;
+    /* ================================= */
+
+    let loadedQuotation = null;
+
+    function numeric(value, fallback = 0) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[character]);
+    }
+
+    function getQuotationInvoiceData(quotation) {
+      const sites = (Array.isArray(quotation.sites) ? quotation.sites : []).map((site, index) => {
+        const perPageCharge = Math.max(0, numeric(site.perPageCharge ?? quotation.perPageCharge ?? quotation.commonAddons?.perPageCharge));
+        const legacyPages = Array.isArray(site.pages) ? site.pages : [];
+        const pagesCount = Math.max(0, Math.floor(numeric(site.pagesCount, legacyPages.length)));
+        const addons = (Array.isArray(site.addons) ? site.addons : [])
+          .filter((addon) => addon.isSelected ?? addon.selected ?? addon.checked ?? true)
+          .map((addon) => ({
+            label: addon.label || addon.name || "Additional service",
+            amount: Math.max(0, numeric(addon.amount ?? addon.unitPrice ?? addon.price)),
+          }));
+        const base = Math.max(0, numeric(site.base ?? site.basePrice));
+        const legacyPageCharge = legacyPages.reduce((sum, page) => sum + Math.max(0, numeric(typeof page === "string" ? perPageCharge : page.amount, perPageCharge)), 0);
+        const pageCharge = pagesCount * perPageCharge || legacyPageCharge;
+        const calculatedSubtotal = base + pageCharge + addons.reduce((sum, addon) => sum + addon.amount, 0);
+        return {
+          name: site.name || `Website ${index + 1}`,
+          base,
+          pagesCount,
+          perPageCharge,
+          pageCharge,
+          addons,
+          subtotal: Math.max(0, numeric(site.subtotal, calculatedSubtotal)),
+        };
+      });
+      const subtotal = Math.max(0, numeric(quotation.grandSubtotal, sites.reduce((sum, site) => sum + site.subtotal, 0)));
+      const discountType = quotation.discountType === "flat" ? "flat" : "percent";
+      const discountValue = Math.max(0, numeric(quotation.discountValue));
+      const computed = tools.calculateTotals({ subtotal, discountType, discountValue });
+      const discountAmount = Math.max(0, numeric(quotation.discountAmount, computed.discountAmount));
+      const gstAmount = Math.max(0, numeric(quotation.gstAmount, computed.gstAmount));
+      const total = Math.max(0, numeric(quotation.total, subtotal - discountAmount + gstAmount));
+
+      return {
+        quotationId: quotation.quotationId || quotation.id || "",
+        clientName: quotation.clientName || "",
+        sites,
+        subtotal,
+        discountType,
+        discountValue,
+        discountAmount,
+        gstAmount,
+        total,
+      };
+    }
+
+    function renderQuotationCharges(quotationData) {
+      document.getElementById("quotationCharges").innerHTML = quotationData.sites.map((site) => `
+    <div class="charge-site">
+      <h3>${escapeHtml(site.name)}</h3>
+      <div class="charge-line"><span>Base package</span><span>${tools.currency(site.base)}</span></div>
+      <div class="charge-line"><span>Extra pages (${site.pagesCount} × ${tools.currency(site.perPageCharge)})</span><span>${tools.currency(site.pageCharge)}</span></div>
+      ${site.addons.map((addon) => `<div class="charge-line"><span>${escapeHtml(addon.label)}</span><span>${tools.currency(addon.amount)}</span></div>`).join("")}
+      <div class="charge-line subtotal"><span>Website subtotal</span><span>${tools.currency(site.subtotal)}</span></div>
+    </div>
+  `).join("");
+    }
+
+    function applyQuotationData(quotation) {
+      loadedQuotation = getQuotationInvoiceData(quotation);
+      document.getElementById("quotationRef").value = loadedQuotation.quotationId;
+      document.getElementById("clientName").value = loadedQuotation.clientName;
+      document.getElementById("paymentStatus").value = "unpaid";
+      document.getElementById("paymentMode").value = "cash";
+      document.getElementById("paymentReference").value = "";
+      renderQuotationCharges(loadedQuotation);
+      document.getElementById("subtotal").textContent = tools.currency(loadedQuotation.subtotal);
+      document.getElementById("discountAmount").textContent = "−" + tools.currency(loadedQuotation.discountAmount);
+      document.getElementById("gstValue").textContent = tools.currency(loadedQuotation.gstAmount);
+      document.getElementById("totalPayable").textContent = tools.currency(loadedQuotation.total);
+      document.getElementById("amountPaid").value = loadedQuotation.total;
+      updatePaymentSummary();
+    }
+
+    async function loadQuotationDetails() {
+      if (window._quotationLoadPending) return;
+      const quotationRef = document.getElementById("quotationRef").value.trim();
+      const statusEl = document.getElementById("loadStatus");
+      if (!quotationRef) {
+        tools.setStatus("#statusMsg", "Please enter a quotation reference first.", true);
+        statusEl.textContent = "Quotation ID required";
+        statusEl.className = "status err";
+        return;
+      }
+
+      if (SCRIPT_URL.indexOf("PASTE_YOUR") === 0) {
+        statusEl.textContent = "Add Apps Script URL first";
+        statusEl.className = "status err";
+        return;
+      }
+
+      window._quotationLoadPending = true;
+      document.getElementById("loadQuotationBtn").disabled = true;
+      try {
+        statusEl.textContent = "Loading quotation...";
+        statusEl.className = "status";
+
+        const result = await api.getQuotation(quotationRef);
+
+        if (!result || result.result !== "success" || !result.quotation) {
+          throw new Error(result?.message || "Quotation not found");
+        }
+
+        if (!Array.isArray(result.quotation.sites) || !result.quotation.sites.length) {
+          throw new Error("The quotation has no website details.");
+        }
+        applyQuotationData(result.quotation);
+        statusEl.textContent = "Quotation loaded";
+        statusEl.className = "status";
+        tools.setStatus("#statusMsg", "Quotation details loaded successfully.");
+      } catch (error) {
+        statusEl.textContent = "Could not load quotation";
+        statusEl.className = "status err";
+        tools.setStatus("#statusMsg", error.message || "Unable to load quotation.", true);
+      } finally {
+        window._quotationLoadPending = false;
+        document.getElementById("loadQuotationBtn").disabled = false;
+      }
+    }
+
+    document.getElementById("loadQuotationBtn").addEventListener("click", loadQuotationDetails);
+    document.getElementById("invoiceDate").valueAsDate = new Date();
+
+    function updatePaymentSummary() {
+      const total = loadedQuotation ? loadedQuotation.total : 0;
+      const paymentStatus = document.getElementById("paymentStatus").value;
+      const isFull = paymentStatus === "full";
+      const isPartial = paymentStatus === "partial";
+      const paidInput = document.getElementById("amountPaid");
+      const amountPaid = isFull ? total : isPartial ? Math.min(total, Math.max(0, numeric(paidInput.value))) : 0;
+      const balanceDue = Math.max(0, total - amountPaid);
+      document.getElementById("amountPaidField").hidden = !isPartial;
+      document.getElementById("paymentModeField").hidden = paymentStatus === "unpaid";
+      document.getElementById("paymentReferenceField").hidden = paymentStatus === "unpaid" || document.getElementById("paymentMode").value !== "online";
+      if (isFull && loadedQuotation) paidInput.value = total;
+      if (paymentStatus === "unpaid") paidInput.value = 0;
+      document.getElementById("amountReceivedSummary").textContent = tools.currency(amountPaid);
+      document.getElementById("balanceDue").textContent = tools.currency(balanceDue);
+    }
+
+    function gatherData() {
+      if (!loadedQuotation) return null;
+      const paymentStatus = document.getElementById("paymentStatus").value;
+      const amountPaid = paymentStatus === "full" ? loadedQuotation.total
+        : paymentStatus === "partial" ? Math.min(loadedQuotation.total, Math.max(0, numeric(document.getElementById("amountPaid").value)))
+          : 0;
+      return {
+        ...loadedQuotation,
+        invoiceDate: document.getElementById("invoiceDate").value,
+        dueDate: document.getElementById("dueDate").value,
+        paymentStatus,
+        paymentMode: paymentStatus === "unpaid" ? "" : document.getElementById("paymentMode").value,
+        paymentReference: paymentStatus === "unpaid" ? "" : document.getElementById("paymentReference").value.trim(),
+        amountPaid,
+        balanceDue: Math.max(0, loadedQuotation.total - amountPaid),
+        amount: loadedQuotation.total,
+      };
+    }
+
+    document.getElementById("paymentStatus").addEventListener("change", () => {
+      if (document.getElementById("paymentStatus").value === "partial") {
+        document.getElementById("amountPaid").value = "";
+      } else if (document.getElementById("paymentStatus").value === "unpaid") {
+        document.getElementById("amountPaid").value = 0;
+      }
+      updatePaymentSummary();
+    });
+    document.getElementById("paymentMode").addEventListener("change", updatePaymentSummary);
+    document.getElementById("amountPaid").addEventListener("input", updatePaymentSummary);
+    document.getElementById("quotationRef").addEventListener("input", () => {
+      loadedQuotation = null;
+      document.getElementById("clientName").value = "";
+      document.getElementById("quotationCharges").innerHTML = '<span class="status">Load a quotation to see its websites and charges.</span>';
+      document.getElementById("subtotal").textContent = tools.currency(0);
+      document.getElementById("discountAmount").textContent = "−" + tools.currency(0);
+      document.getElementById("gstValue").textContent = tools.currency(0);
+      document.getElementById("totalPayable").textContent = tools.currency(0);
+      updatePaymentSummary();
+    });
+    document.getElementById("quotationRef").addEventListener("change", loadQuotationDetails);
+    document.getElementById("quotationRef").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") loadQuotationDetails();
+    });
+    updatePaymentSummary();
+
+    function renderPreview(data, savedId) {
+      const siteRows = data.sites.map((site) => `
+    <tr><th colspan="2">${escapeHtml(site.name)}</th></tr>
+    <tr><td>Base package</td><td class="right">${tools.currency(site.base)}</td></tr>
+    <tr><td>Extra pages (${site.pagesCount} × ${tools.currency(site.perPageCharge)})</td><td class="right">${tools.currency(site.pageCharge)}</td></tr>
+    ${site.addons.map((addon) => `<tr><td>${escapeHtml(addon.label)}</td><td class="right">${tools.currency(addon.amount)}</td></tr>`).join("")}
+    <tr><td><strong>Website subtotal</strong></td><td class="right"><strong>${tools.currency(site.subtotal)}</strong></td></tr>
+  `).join("");
+
+      document.getElementById("docPreview").innerHTML = `
+    <div class="doc-id-banner" id="docIdBanner">Saved as <strong id="docIdText"></strong></div>
+    <div class="doc-header"><span class="doc-mark"></span><span class="doc-brand">InsightLogiq</span></div>
+    <h3 class="doc-title">Invoice</h3>
+    <div class="doc-subtitle">Website Development Services</div>
+    <table>
+      <tr><th>Field</th><th>Details</th></tr>
+      <tr><td>Invoice ID</td><td>${escapeHtml(savedId || "(assigned on save)")}</td></tr>
+      <tr><td>Quotation Ref.</td><td>${escapeHtml(data.quotationId || "—")}</td></tr>
+      <tr><td>Billed To</td><td>${escapeHtml(data.clientName || "—")}</td></tr>
+      <tr><td>Invoice Date</td><td>${escapeHtml(data.invoiceDate || "—")}</td></tr>
+      <tr><td>Due Date</td><td>${escapeHtml(data.dueDate || "—")}</td></tr>
+    </table>
+    <h4 class="doc-h">Charges</h4>
+    <table><tr><th>Item</th><th class="right">Charge</th></tr>
+      ${siteRows}
+      <tr><td>Grand subtotal</td><td class="right">${tools.currency(data.subtotal)}</td></tr>
+      <tr><td>Quotation discount</td><td class="right">−${tools.currency(data.discountAmount)}</td></tr>
+      <tr><td>GST (18%)</td><td class="right">${tools.currency(data.gstAmount)}</td></tr>
+      <tr class="doc-row-total"><td>Total payable</td><td class="right">${tools.currency(data.amount)}</td></tr>
+    </table>
+    <h4 class="doc-h">Payment</h4>
+    <table>
+      <tr><td>Payment status</td><td>${data.paymentStatus === "full" ? "Full payment" : data.paymentStatus === "partial" ? "Partial payment" : "Unpaid / due"}</td></tr>
+      ${data.paymentStatus !== "unpaid" ? `<tr><td>Payment mode</td><td>${data.paymentMode === "cash" ? "Cash" : "Online"}</td></tr>` : ""}
+      ${data.paymentReference ? `<tr><td>Transaction reference</td><td>${escapeHtml(data.paymentReference)}</td></tr>` : ""}
+      <tr><td>Amount received</td><td class="right">${tools.currency(data.amountPaid)}</td></tr>
+      <tr class="doc-row-total"><td>Balance due</td><td class="right">${tools.currency(data.balanceDue)}</td></tr>
+    </table>
+    <div class="doc-sig">Authorized Signature: ______________________</div>
+  `;
+      if (savedId) {
+        document.getElementById("docIdBanner").style.display = "block";
+        document.getElementById("docIdText").textContent = savedId;
+      }
+    }
+
+    const modalBackdrop = document.getElementById("modalBackdrop");
+    document.getElementById("previewBtn").addEventListener("click", () => {
+      const data = gatherData();
+      if (!data) {
+        tools.setStatus("#statusMsg", "Load a quotation before previewing the invoice.", true);
+        return;
+      }
+      if (!data.clientName || !data.sites.length) {
+        tools.setStatus("#statusMsg", "The loaded quotation is missing client or website details.", true);
+        return;
+      }
+      if (!data || data.paymentStatus === "partial" && (data.amountPaid <= 0 || data.amountPaid >= data.amount)) {
+        tools.setStatus("#statusMsg", "For partial payment, enter an amount greater than zero and less than the total.", true);
+        return;
+      }
+      tools.setStatus("#statusMsg");
+      window._currentData = data;
+      renderPreview(data, null);
+      document.getElementById("resultBox").style.display = "none";
+      document.getElementById("confirmSaveBtn").disabled = false;
+      document.getElementById("confirmSaveBtn").textContent = "Confirm & Save";
+      modalBackdrop.classList.add("open");
+    });
+    document.getElementById("closeModalBtn").addEventListener("click", () => modalBackdrop.classList.remove("open"));
+
+    document.getElementById("downloadPdfBtn").addEventListener("click", async (event) => {
+      const el = document.getElementById("docPreview");
+      const nameSafe = (window._currentData.clientName || "invoice").replace(/[^a-z0-9]+/gi, "_");
+      const button = event.currentTarget;
+      button.disabled = true;
+      button.textContent = "Preparing PDF...";
+      try {
+        await tools.downloadPdf(el, `InsightLogiq_Invoice_${nameSafe}.pdf`);
+      } catch (error) {
+        tools.setStatus("#statusMsg", error.message || "Could not generate the PDF.", true);
+      } finally {
+        button.disabled = false;
+        button.textContent = "Download PDF";
+      }
+    });
+
+    document.getElementById("confirmSaveBtn").addEventListener("click", async () => {
+      const btn = document.getElementById("confirmSaveBtn");
+
+      if (SCRIPT_URL.indexOf("PASTE_YOUR") === 0) {
+        btn.textContent = "Add Apps Script URL in code first";
+        return;
+      }
+
+      const data = window._currentData;
+      const payload = {
+        type: "invoice",
+        quotationId: data.quotationId,
+        websiteName: data.sites.map((site) => site.name).join(", "),
+        sites: data.sites,
+        clientName: data.clientName,
+        invoiceDate: data.invoiceDate,
+        dueDate: data.dueDate,
+        base: data.sites.reduce((sum, site) => sum + site.base, 0),
+        addons: data.sites.flatMap((site) => site.addons.map((addon) => ({
+          websiteName: site.name,
+          label: addon.label,
+          amount: addon.amount,
+        }))),
+        subtotal: data.subtotal,
+        discountType: data.discountType,
+        discountValue: data.discountValue,
+        discountAmount: data.discountAmount,
+        gstAmount: data.gstAmount,
+        amount: data.amount,
+        amountPaid: data.amountPaid,
+        balanceDue: data.balanceDue,
+        paymentStatus: data.paymentStatus,
+        paymentMode: data.paymentMode,
+        paymentReference: data.paymentReference,
+      };
+
+      btn.disabled = true;
+      btn.textContent = "Saving...";
+
+      try {
+        const result = await api.save(payload);
+        if (result.result === "success") {
+          renderPreview(data, result.invoiceId);
+          document.getElementById("resultId").textContent = result.invoiceId;
+          document.getElementById("resultBox").style.display = "block";
+          btn.textContent = "Saved";
+        } else {
+          btn.disabled = false;
+          btn.textContent = "Confirm & Save";
+          tools.setStatus("#statusMsg", "Error: " + (result.message || "could not save."), true);
+        }
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Confirm & Save";
+        tools.setStatus("#statusMsg", err.message || "Unable to save invoice. Check the Apps Script URL and try again.", true);
+      }
+    });
+  </script>
+</body>
+
+</html>

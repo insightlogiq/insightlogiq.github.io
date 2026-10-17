@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quotation Generator — InsightLogiq</title>
+<link rel="stylesheet" href="common.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brand"><img src="../assets/InsightLogiq%20Logo.png" alt="InsightLogiq Logo" class="brand-logo"><span>InsightLogiq</span></div>
+  <h1>Quotation Generator</h1>
+  <div class="sub">Fill in client and website details — totals calculate automatically.</div>
+
+  <section class="card">
+    <h2>Start From Existing Quotation</h2>
+    <div class="grid2">
+      <div class="field"><label for="sourceQuotationRef">Existing Quotation ID</label>
+        <input type="text" id="sourceQuotationRef" placeholder="e.g. Q-20260924-3"></div>
+      <div class="field" style="display:flex;align-items:flex-end;">
+        <button type="button" class="add-site-btn" id="loadSourceQuotationBtn">Load quotation details</button>
+      </div>
+    </div>
+    <span class="status" id="sourceQuotationStatus" aria-live="polite"></span>
+  </section>
+
+  <section class="card">
+    <h2>Client Details</h2>
+    <div class="grid2">
+      <div class="field"><label for="clientName">Client Name</label>
+        <input type="text" id="clientName" placeholder="e.g. Sharma Textiles Pvt Ltd"></div>
+      <div class="field"><label for="quoteDate">Date</label>
+        <input type="date" id="quoteDate"></div>
+      <div class="field"><label for="validUntil">Valid Until</label>
+        <input type="date" id="validUntil"></div>
+    </div>
+  </section>
+
+  <section class="card" id="sitesContainer">
+    <h2>Website Projects</h2>
+    <div class="base-package-panel">
+      <div>
+        <h3>Common add-ons (applied across websites)</h3>
+        <ul>
+          <li>The base charge applies once to each website.</li>
+          <li>The shared per-page rate applies to each extra page beyond the three included in the base package.</li>
+        </ul>
+      </div>
+      <div class="common-charge-fields" id="commonAddonFields"></div>
+    </div>
+    <div id="sitesList"></div>
+    <button type="button" class="add-site-btn" id="addSiteBtn">+ Add another website</button>
+  </section>
+
+  <section class="card">
+    <h2>Summary</h2>
+    <div id="siteSummaryRows"></div>
+    <div class="summary-row"><span>Grand Subtotal</span><span id="grandSubtotal">₹0</span></div>
+    <div class="discount-row">
+      <select id="discountType"><option value="percent">% off</option><option value="flat">₹ off</option></select>
+      <input type="number" id="discountValue" min="0" placeholder="0" value="0">
+      <span id="discountComputed" style="font-size:13.5px;color:var(--ink-soft);">−₹0</span>
+    </div>
+    <div class="summary-row"><span>GST (18%)</span><span id="gstValue">₹0</span></div>
+    <div class="summary-row total"><span>Total Payable</span><span id="totalPayable">₹0</span></div>
+  </section>
+
+  <section class="card">
+    <div class="submit-bar">
+      <button class="primary" id="previewBtn">Preview Quotation</button>
+      <span class="status" id="statusMsg"></span>
+    </div>
+  </section>
+
+</div>
+
+<!-- ===== Preview / PDF modal ===== -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal-box">
+    <div class="modal-toolbar">
+      <strong style="font-size:13.5px;color:var(--blue);">Quotation Preview</strong>
+      <div class="actions">
+        <button class="btn-close" id="closeModalBtn">Close</button>
+        <button class="btn-download" id="downloadPdfBtn">Download PDF</button>
+        <button class="btn-confirm" id="confirmSaveBtn">Confirm &amp; Save</button>
+      </div>
+    </div>
+    <div id="docPreview"></div>
+    <div class="result" id="resultBox" style="margin:0 34px 22px;">
+      Saved as <strong id="resultId"></strong>.
+    </div>
+  </div>
+</div>
+
+<script src="insightlogiq-tools.js"></script>
+<script src="insightlogiq-api.js"></script>
+<script>
+/* ============ CONFIG ============ */
+const tools = window.InsightLogiqTools;
+const api = window.InsightLogiqApi;
+
+const SCRIPT_URL = tools.SCRIPT_URL;
+/* ================================= */
+
+const ADDON_DEFS = tools.getAddonCatalog().map((addon) => ({
+  ...addon,
+  key: addon.addOnId,
+  label: addon.label,
+  perUnit: addon.defaultPrice,
+}));
+const COMMON_ADDON_DEFS = tools.getCommonAddonCatalog();
+
+let siteCount = 0;
+let sourceQuotationId = "";
+const sitesList = document.getElementById("sitesList");
+
+function commonAddonInputId(addOnId) {
+  return `commonAddon-${addOnId}`;
+}
+
+function commonAddonRate(addOnId) {
+  return parseFloat(document.getElementById(commonAddonInputId(addOnId)).value) || 0;
+}
+
+function setCommonAddonRate(addOnId, value) {
+  document.getElementById(commonAddonInputId(addOnId)).value = value ?? "";
+}
+
+COMMON_ADDON_DEFS.forEach((addon) => {
+  const field = document.createElement("div");
+  field.className = "field";
+  field.innerHTML = `
+    <label for="${commonAddonInputId(addon.addOnId)}">${addon.label} (₹)</label>
+    <input type="number" id="${commonAddonInputId(addon.addOnId)}" min="0" step="0.01" value="${addon.defaultPrice}" placeholder="Set shared rate">
+  `;
+  document.getElementById("commonAddonFields").appendChild(field);
+  field.querySelector("input").addEventListener("input", recalc);
+});
+
+function buildAddonRow(addon) {
+  return `
+    <div class="addon-row">
+      <input type="checkbox" class="addon-check" data-key="${addon.key}">
+      <label style="margin:0;">${addon.label}</label>
+      <input type="number" class="addon-amount" min="0" placeholder="₹0" value="${addon.perUnit || ""}">
+    </div>
+  `;
+}
+
+function getSiteData(siteEl) {
+  const name = siteEl.querySelector(".site-name").value || "Untitled website";
+  const baseCharge = commonAddonRate("baseCharge");
+  const perPageCharge = commonAddonRate("perPageCharge");
+  const pagesCount = Math.max(0, Math.floor(parseFloat(siteEl.querySelector(".page-count").value) || 0));
+  const pageCharge = pagesCount * perPageCharge;
+
+  const addons = Array.from(siteEl.querySelectorAll(".addon-row"))
+    .map((row) => {
+      const checkBox = row.querySelector(".addon-check");
+      const amountInput = row.querySelector(".addon-amount");
+      const isSelected = checkBox.checked;
+      const amount = parseFloat(amountInput.value) || 0;
+
+      return {
+        key: checkBox.dataset.key,
+        label: row.querySelector("label").textContent,
+        amount,
+        isSelected,
+      };
+    })
+    .filter((addon) => addon.isSelected)
+    .map(({ key, label, amount }) => ({ key, label, amount }));
+
+  const subtotal = baseCharge + pageCharge + addons.reduce((sum, addon) => sum + addon.amount, 0);
+  return { name, base: baseCharge, baseCharge, perPageCharge, pagesCount, pageCharge, addons, subtotal };
+}
+
+function addSite(siteData = null) {
+  siteCount += 1;
+  const index = siteCount;
+  const siteEl = document.createElement("div");
+  siteEl.className = "site";
+  siteEl.dataset.idx = index;
+  siteEl.innerHTML = `
+    <div class="site-head">
+      <strong>Website ${index}</strong>
+      ${index > 1 ? '<button type="button" class="remove-site">Remove</button>' : ""}
+    </div>
+    <div class="site-details">
+      <div class="field">
+        <label>Website Name</label>
+        <input type="text" class="site-name" placeholder="https://www.example.com">
+      </div>
+      <div class="field">
+        <label>Extra pages (beyond 3 included)</label>
+        <input type="number" class="page-count" min="0" step="1" value="0" placeholder="0">
+      </div>
+    </div>
+    <div class="common-charge-fields">
+      <div class="field">
+        <label>Shared base charge (read-only)</label>
+        <input type="number" class="site-base-charge readonly-charge" min="0" step="0.01" readonly>
+      </div>
+      <div class="field">
+        <label>Extra-page charges (read-only)</label>
+        <input type="text" class="site-page-charge readonly-charge" readonly>
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <label style="margin-bottom:8px;">Add-ons for this website</label>
+      ${ADDON_DEFS.map(buildAddonRow).join("")}
+    </div>
+    <div class="site-subtotal">
+      <span>Website Subtotal</span>
+      <span class="site-subtotal-value">₹0</span>
+    </div>
+  `;
+
+  sitesList.appendChild(siteEl);
+  if (siteData) {
+    siteEl.querySelector(".site-name").value = siteData.name || "";
+    const savedPagesCount = siteData.pagesCount ?? (Array.isArray(siteData.pages) ? siteData.pages.length : 0);
+    siteEl.querySelector(".page-count").value = savedPagesCount;
+
+    const savedAddons = Array.isArray(siteData.addons) ? siteData.addons : [];
+    siteEl.querySelectorAll(".addon-row").forEach((row) => {
+      const checkbox = row.querySelector(".addon-check");
+      const savedAddon = savedAddons.find((addon) => (addon.addOnId || addon.key || addon.id) === checkbox.dataset.key);
+      if (!savedAddon) return;
+      checkbox.checked = Boolean(savedAddon.isSelected ?? savedAddon.selected ?? savedAddon.checked ?? true);
+      row.querySelector(".addon-amount").value = savedAddon.amount ?? savedAddon.unitPrice ?? savedAddon.price ?? 0;
+    });
+  }
+  siteEl.addEventListener("input", recalc);
+
+  const removeBtn = siteEl.querySelector(".remove-site");
+  if (removeBtn) {
+    removeBtn.addEventListener("click", () => {
+      siteEl.remove();
+      recalc();
+    });
+  }
+
+  recalc();
+}
+
+document.getElementById("addSiteBtn").addEventListener("click", addSite);
+function updateCommonChargeDisplays() {
+  const baseCharge = commonAddonRate("baseCharge");
+  const perPageCharge = commonAddonRate("perPageCharge");
+  document.querySelectorAll(".site").forEach((siteEl) => {
+    const pageCount = Math.max(0, Math.floor(parseFloat(siteEl.querySelector(".page-count").value) || 0));
+    siteEl.querySelector(".site-base-charge").value = baseCharge;
+    siteEl.querySelector(".site-page-charge").value = `${pageCount} extra page${pageCount === 1 ? "" : "s"} × ${tools.currency(perPageCharge)} = ${tools.currency(pageCount * perPageCharge)}`;
+  });
+}
+
+async function loadSourceQuotation() {
+  const quotationId = document.getElementById("sourceQuotationRef").value.trim();
+  const statusEl = document.getElementById("sourceQuotationStatus");
+  if (!quotationId) {
+    statusEl.textContent = "Enter a quotation ID first.";
+    statusEl.className = "status err";
+    return;
+  }
+  if (SCRIPT_URL.indexOf("PASTE_YOUR") === 0) {
+    statusEl.textContent = "Add the Apps Script URL before loading quotations.";
+    statusEl.className = "status err";
+    return;
+  }
+
+  statusEl.textContent = "Loading quotation...";
+  statusEl.className = "status";
+  const loadButton = document.getElementById("loadSourceQuotationBtn");
+  loadButton.disabled = true;
+  try {
+    const result = await api.getQuotation(quotationId);
+    if (!response.ok || result?.result !== "success" || !result.quotation) {
+      throw new Error(result?.message || "Quotation not found.");
+    }
+
+    const quotation = result.quotation;
+    const sites = Array.isArray(quotation.sites) ? quotation.sites : [];
+    if (!sites.length) throw new Error("The quotation has no website details to load.");
+
+    document.getElementById("clientName").value = quotation.clientName || "";
+    document.getElementById("validUntil").value = quotation.validUntil || "";
+    document.getElementById("quoteDate").valueAsDate = new Date();
+    setCommonAddonRate("baseCharge", quotation.commonAddons?.baseCharge
+      ?? quotation.basePackageCharge
+      ?? quotation.basePackage?.charge
+      ?? sites[0].base
+      ?? sites[0].basePrice
+      ?? COMMON_ADDON_DEFS.find((addon) => addon.addOnId === "baseCharge").defaultPrice);
+    setCommonAddonRate("perPageCharge", quotation.commonAddons?.perPageCharge
+      ?? quotation.perPageCharge
+      ?? sites[0].perPageCharge
+      ?? sites[0].pages?.[0]?.amount
+      ?? COMMON_ADDON_DEFS.find((addon) => addon.addOnId === "perPageCharge").defaultPrice);
+    document.getElementById("discountType").value = quotation.discountType === "flat" ? "flat" : "percent";
+    document.getElementById("discountValue").value = quotation.discountValue ?? 0;
+    sitesList.replaceChildren();
+    siteCount = 0;
+    sites.forEach((site) => addSite(site));
+    sourceQuotationId = quotation.quotationId || quotation.id || quotationId;
+    recalc();
+    statusEl.textContent = "Quotation loaded. Review the details and save it as a new quotation.";
+    statusEl.className = "status";
+  } catch (error) {
+    statusEl.textContent = error.message || "Unable to load quotation.";
+    statusEl.className = "status err";
+  } finally {
+    loadButton.disabled = false;
+  }
+}
+
+document.getElementById("loadSourceQuotationBtn").addEventListener("click", loadSourceQuotation);
+document.getElementById("sourceQuotationRef").addEventListener("input", () => {
+  sourceQuotationId = "";
+});
+
+function gatherData() {
+  const sites = Array.from(document.querySelectorAll(".site")).map(getSiteData);
+  const grandSubtotal = sites.reduce((sum, site) => sum + site.subtotal, 0);
+  const discountType = document.getElementById("discountType").value;
+  const discountValue = parseFloat(document.getElementById("discountValue").value) || 0;
+  const totals = tools.calculateTotals({ subtotal: grandSubtotal, discountType, discountValue });
+
+  return {
+    clientName: document.getElementById("clientName").value.trim(),
+    date: document.getElementById("quoteDate").value,
+    validUntil: document.getElementById("validUntil").value,
+    commonAddons: Object.fromEntries(COMMON_ADDON_DEFS.map((addon) => [addon.addOnId, commonAddonRate(addon.addOnId)])),
+    basePackageInclusions: [
+      "Website setup and configuration",
+      "Standard page structure and responsive layout",
+      "Placement of client-provided content",
+    ],
+    sites,
+    grandSubtotal,
+    discountType,
+    discountValue,
+    discountAmount: totals.discountAmount,
+    gstAmount: totals.gstAmount,
+    total: totals.total,
+  };
+}
+
+function recalc() {
+  updateCommonChargeDisplays();
+  const data = gatherData();
+
+  document.getElementById("siteSummaryRows").innerHTML = data.sites
+    .map((site) => `<div class="summary-row"><span>${site.name}</span><span>${tools.currency(site.subtotal)}</span></div>`)
+    .join("");
+
+  document.getElementById("grandSubtotal").textContent = tools.currency(data.grandSubtotal);
+  document.getElementById("discountComputed").textContent = "−" + tools.currency(data.discountAmount);
+  document.getElementById("gstValue").textContent = tools.currency(data.gstAmount);
+  document.getElementById("totalPayable").textContent = tools.currency(data.total);
+
+  document.querySelectorAll(".site").forEach((siteEl, index) => {
+    siteEl.querySelector(".site-subtotal-value").textContent = tools.currency(data.sites[index].subtotal);
+  });
+}
+
+document.getElementById("discountType").addEventListener("change", recalc);
+document.getElementById("discountValue").addEventListener("input", recalc);
+addSite();
+document.getElementById("quoteDate").valueAsDate = new Date();
+
+/* ============ PREVIEW RENDER ============ */
+function renderPreview(data, savedId) {
+  const dateStr = data.date || "—";
+  const validStr = data.validUntil || "—";
+
+  const siteBlocks = data.sites.map((s, i) => `
+    <h4 class="doc-h">Website ${i + 1}: ${s.name}</h4>
+    <table>
+      <tr><th>Feature / Item</th><th class="right">Charge</th></tr>
+      <tr><td>Base charge</td><td class="right">${tools.currency(s.base)}</td></tr>
+      <tr><td>Extra pages (${s.pagesCount} × ${tools.currency(s.perPageCharge)})</td><td class="right">${tools.currency(s.pageCharge)}</td></tr>
+      ${s.addons.map((a) => `<tr><td>${a.label}</td><td class="right">${tools.currency(a.amount)}</td></tr>`).join("")}
+      <tr class="doc-row-total"><td>Website Subtotal</td><td class="right">${tools.currency(s.subtotal)}</td></tr>
+    </table>
+  `).join("");
+
+  const summaryRows = data.sites.map((s) => `<tr><td>${s.name}</td><td class="right">${tools.currency(s.subtotal)}</td></tr>`).join("");
+  const discountLabel = data.discountType === "percent" ? `${data.discountValue}% off` : `₹${data.discountValue} off`;
+
+  document.getElementById("docPreview").innerHTML = `
+    <div class="doc-id-banner" id="docIdBanner">Saved as <strong id="docIdText"></strong></div>
+    <div class="doc-header"><span class="doc-mark"></span><span class="doc-brand">InsightLogiq</span></div>
+    <h3 class="doc-title">Website Development Quotation</h3>
+    <div class="doc-subtitle">Multi-Website Package</div>
+    <table>
+      <tr><th>Field</th><th>Details</th></tr>
+      <tr><td>Quotation ID</td><td>${savedId || "(assigned on save)"}</td></tr>
+      <tr><td>Prepared For</td><td>${data.clientName || "—"}</td></tr>
+      <tr><td>Date</td><td>${dateStr}</td></tr>
+      <tr><td>Valid Until</td><td>${validStr}</td></tr>
+      <tr><td>Prepared By</td><td>InsightLogiq</td></tr>
+    </table>
+    <h4 class="doc-h">Website-wise Feature &amp; Pricing Breakdown</h4>
+    <h4 class="doc-h">Common Add-ons</h4>
+    <ul>
+      ${COMMON_ADDON_DEFS.map((addon) => `<li>${addon.label}: ${tools.currency(data.commonAddons[addon.addOnId])}</li>`).join("")}
+    </ul>
+    <h4 class="doc-h">Base Package Includes</h4>
+    <ul>${data.basePackageInclusions.map((item) => `<li>${item}</li>`).join("")}</ul>
+    ${siteBlocks}
+    <h4 class="doc-h">Combined Summary</h4>
+    <table>
+      <tr><th>Website Name</th><th class="right">Subtotal</th></tr>
+      ${summaryRows}
+      <tr><td>Grand Subtotal</td><td class="right">${tools.currency(data.grandSubtotal)}</td></tr>
+      <tr><td>Discount (${discountLabel})</td><td class="right">−${tools.currency(data.discountAmount)}</td></tr>
+      <tr><td>GST (18%)</td><td class="right">${tools.currency(data.gstAmount)}</td></tr>
+      <tr class="doc-row-total"><td>Total Payable</td><td class="right">${tools.currency(data.total)}</td></tr>
+    </table>
+    <h4 class="doc-h">Payment Schedule (per website)</h4>
+    <ul>
+      <li>50% advance to begin work on that website, balance on completion.</li>
+      <li>Each website invoiced individually upon delivery, referencing this Quotation ID.</li>
+    </ul>
+    <div class="doc-sig">Authorized Signature: ______________________</div>
+  `;
+  if (savedId) {
+    document.getElementById("docIdBanner").style.display = "block";
+    document.getElementById("docIdText").textContent = savedId;
+  }
+}
+
+const modalBackdrop = document.getElementById("modalBackdrop");
+document.getElementById("previewBtn").addEventListener("click", () => {
+  const data = gatherData();
+  if (!data.clientName) {
+    tools.setStatus("#statusMsg", "Please enter the client name first.", true);
+    return;
+  }
+
+  tools.setStatus("#statusMsg");
+  window._currentData = data;
+  window._savedId = null;
+  renderPreview(data, null);
+  document.getElementById("resultBox").style.display = "none";
+  document.getElementById("confirmSaveBtn").disabled = false;
+  document.getElementById("confirmSaveBtn").textContent = "Confirm & Save";
+  modalBackdrop.classList.add("open");
+});
+document.getElementById("closeModalBtn").addEventListener("click", () => modalBackdrop.classList.remove("open"));
+
+document.getElementById("downloadPdfBtn").addEventListener("click", async (event) => {
+  const el = document.getElementById("docPreview");
+  const clientSafe = (window._currentData.clientName || "quotation").replace(/[^a-z0-9]+/gi, "_");
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = "Preparing PDF...";
+  try {
+    debugger;
+    await tools.downloadPdf(el, `InsightLogiq_Quotation_${clientSafe}.pdf`);
+    debugger;
+  } catch (error) {
+    tools.setStatus("#statusMsg", error.message || "Could not generate the PDF.", true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Download PDF";
+  }
+});
+
+document.getElementById("confirmSaveBtn").addEventListener("click", async () => {
+  const btn = document.getElementById("confirmSaveBtn");
+
+  if (SCRIPT_URL.indexOf("PASTE_YOUR") === 0) {
+    btn.textContent = "Add Apps Script URL in code first";
+    return;
+  }
+
+  const data = window._currentData;
+  const payload = {
+    type: "quotation",
+    ...data,
+    ...(sourceQuotationId ? { sourceQuotationId } : {}),
+  };
+
+  btn.disabled = true;
+  btn.textContent = "Saving...";
+
+  try {
+      const result = await api.save(payload);
+    if (result.result === "success") {
+      window._savedId = result.quotationId;
+      renderPreview(data, result.quotationId);
+      document.getElementById("resultId").textContent = result.quotationId;
+      document.getElementById("resultBox").style.display = "block";
+      btn.textContent = "Saved";
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Confirm & Save";
+      tools.setStatus("#statusMsg", "Error: " + (result.message || "could not save."), true);
+    }
+    } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "Confirm & Save";
+      tools.setStatus("#statusMsg", err.message || "Unable to save quotation. Check the Apps Script URL and try again.", true);
+  }
+});
+</script>
+</body>
+</html>
